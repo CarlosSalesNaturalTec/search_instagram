@@ -1,0 +1,12 @@
+# Frameworks e Bibliotecas
+fastapi
+uvicorn[standard]
+python-dotenv
+
+# Google Cloud
+google-cloud-firestore
+google-cloud-storage
+google-cloud-secret-manager
+
+# Instagram Scraper
+instaloader
