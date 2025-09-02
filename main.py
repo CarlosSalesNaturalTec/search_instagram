@@ -52,3 +52,7 @@ async def health_check():
     Endpoint de health check para o Cloud Run.
     """
     return {"status": "ok"}
+
+@app.get("/")
+def read_root():
+    return {"message": "Search Instagram está no ar!"}
