@@ -1,11 +1,15 @@
 # /search_instagram/firestore_service.py
-import os
 from google.cloud import firestore
+from google.cloud.firestore_v1.base_query import FieldFilter
 from logging_config import logging
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional
+import uuid
 
 class FirestoreService:
     """
-    Classe de serviço para interagir com o Google Firestore.
+    Classe de serviço para interagir com o Google Firestore, expandida para
+    suportar as operações do módulo Search_Instagram.
     """
     def __init__(self):
         """
@@ -18,45 +22,173 @@ class FirestoreService:
             logging.error(f"Falha ao conectar com o Firestore: {e}")
             raise
 
-    def save_instagram_post(self, post_data: dict):
+    def get_service_account_for_work(self) -> Optional[Dict[str, Any]]:
         """
-        Salva os dados de um post do Instagram no Firestore.
-
-        Args:
-            post_data (dict): Dicionário contendo os dados do post.
-        
-        Returns:
-            str: O ID do documento criado no Firestore.
-        """
-        try:
-            collection_name = os.getenv("FIRESTORE_COLLECTION", "instagram_posts")
-            doc_ref = self.db.collection(collection_name).add(post_data)
-            logging.info(f"Post salvo com sucesso no Firestore com o ID: {doc_ref.id}")
-            return doc_ref.id
-        except Exception as e:
-            logging.error(f"Erro ao salvar post no Firestore: {e}")
-            return None
-
-    def get_document_by_id(self, doc_id: str):
-        """
-        Busca um documento no Firestore pelo seu ID.
-
-        Args:
-            doc_id (str): O ID do documento a ser buscado.
+        Seleciona a conta de serviço 'active' com o uso mais antigo.
 
         Returns:
-            dict: Os dados do documento encontrado ou None se não existir.
+            Um dicionário com os dados da conta ou None se nenhuma estiver disponível.
         """
         try:
-            collection_name = os.getenv("FIRESTORE_COLLECTION", "instagram_posts")
-            doc_ref = self.db.collection(collection_name).document(doc_id)
-            document = doc_ref.get()
-            if document.exists:
-                logging.info(f"Documento com ID {doc_id} encontrado.")
-                return document.to_dict()
-            else:
-                logging.warning(f"Documento com ID {doc_id} não encontrado.")
+            acc_ref = self.db.collection('service_accounts')
+            query = acc_ref.where(filter=FieldFilter("status", "==", "active")).order_by("last_used_at", direction=firestore.Query.ASCENDING).limit(1)
+            
+            # Precisamos pegar o ID do documento junto com os dados
+            accounts = []
+            for doc in query.stream():
+                account_data = doc.to_dict()
+                account_data['doc_id'] = doc.id # Adiciona o ID para referência futura
+                accounts.append(account_data)
+
+            if not accounts:
+                logging.warning("Nenhuma conta de serviço ativa encontrada.")
                 return None
+            
+            account = accounts[0]
+            logging.info(f"Conta de serviço selecionada para trabalho: {account.get('username')}")
+            return account
         except Exception as e:
-            logging.error(f"Erro ao buscar documento no Firestore: {e}")
+            logging.error(f"Erro ao buscar conta de serviço no Firestore: {e}")
             return None
+
+    def update_service_account_status(self, username: str, status: str, last_used_at: Optional[datetime] = None) -> bool:
+        """
+        Atualiza o status e a data de último uso de uma conta de serviço.
+
+        Args:
+            username (str): O nome de usuário da conta a ser atualizada.
+            status (str): O novo status ('active', 'session_expired', 'banned').
+            last_used_at (datetime, optional): Timestamp do último uso. Defaults to None.
+
+        Returns:
+            True se a atualização for bem-sucedida, False caso contrário.
+        """
+        try:
+            acc_ref = self.db.collection('service_accounts')
+            query = acc_ref.where(filter=FieldFilter("username", "==", username)).limit(1)
+            docs = list(query.stream())
+
+            if not docs:
+                logging.error(f"Nenhuma conta de serviço encontrada com o username: {username}")
+                return False
+
+            doc_id = docs[0].id
+            update_data = {"status": status}
+            if last_used_at:
+                update_data["last_used_at"] = last_used_at
+            
+            self.db.collection('service_accounts').document(doc_id).update(update_data)
+            logging.info(f"Status da conta {username} atualizado para '{status}'.")
+            return True
+        except Exception as e:
+            logging.error(f"Erro ao atualizar status da conta {username}: {e}")
+            return False
+
+    def get_active_monitored_profiles(self) -> List[Dict[str, Any]]:
+        """
+        Busca todos os perfis monitorados que estão ativos.
+        O ID do documento é o próprio 'instagram_username'.
+        """
+        return self._get_active_items('monitored_profiles')
+
+    def get_active_monitored_hashtags(self) -> List[Dict[str, Any]]:
+        """
+        Busca todas as hashtags monitoradas que estão ativas.
+        O ID do documento é a hashtag sem o '#'.
+        """
+        return self._get_active_items('monitored_hashtags')
+
+    def _get_active_items(self, collection_name: str) -> List[Dict[str, Any]]:
+        """
+        Função auxiliar para buscar itens ativos de uma coleção.
+        """
+        try:
+            coll_ref = self.db.collection(collection_name)
+            query = coll_ref.where(filter=FieldFilter("is_active", "==", True))
+            # O ID do documento é a chave primária (username/hashtag)
+            items = [doc.to_dict() for doc in query.stream()]
+            logging.info(f"{len(items)} itens ativos encontrados em '{collection_name}'.")
+            return items
+        except Exception as e:
+            logging.error(f"Erro ao buscar itens ativos de '{collection_name}': {e}")
+            return []
+
+    def update_monitored_item_scan_time(self, collection_name: str, doc_id: str):
+        """
+        Atualiza o campo 'last_scanned_at' de um item monitorado.
+        """
+        try:
+            doc_ref = self.db.collection(collection_name).document(doc_id)
+            doc_ref.update({"last_scanned_at": datetime.now(timezone.utc)})
+            logging.info(f"Timestamp de varredura atualizado para '{doc_id}' em '{collection_name}'.")
+        except Exception as e:
+            logging.error(f"Erro ao atualizar timestamp de '{doc_id}' em '{collection_name}': {e}")
+
+
+    def save_instagram_data(self, collection_path: str, data: Dict[str, Any], doc_id: str):
+        """
+        Salva (cria ou sobrescreve) um documento em uma coleção/sub-coleção.
+        Usa o ID fornecido como ID do documento para idempotência.
+
+        Args:
+            collection_path (str): Caminho da coleção (ex: 'instagram_posts' ou 'instagram_posts/shortcode/comments').
+            data (Dict[str, Any]): Os dados a serem salvos.
+            doc_id (str): O ID único do documento.
+        """
+        try:
+            # Adiciona um timestamp de coleta
+            if 'collected_at' not in data:
+                data['collected_at'] = datetime.now(timezone.utc)
+            
+            self.db.collection(collection_path).document(doc_id).set(data, merge=True)
+            logging.debug(f"Dados salvos com sucesso em '{collection_path}' com ID '{doc_id}'.")
+        except Exception as e:
+            logging.error(f"Erro ao salvar dados em '{collection_path}' com ID '{doc_id}': {e}")
+
+    def log_system_event(self, run_id: str, service: str, job_type: str, status: str, message: str, error_message: Optional[str] = None, metrics: Optional[Dict[str, int]] = None, end_time: Optional[datetime] = None):
+        """
+        Registra um evento no log do sistema.
+
+        Args:
+            run_id (str): ID da execução do job.
+            service (str): Nome do serviço (ex: 'Search_Instagram').
+            job_type (str): Tipo de job (ex: 'daily_profile_scan').
+            status (str): 'started', 'completed', 'error', 'warning'.
+            message (str): Mensagem descritiva.
+            error_message (str, optional): Detalhes do erro.
+            metrics (Dict[str, int], optional): Métricas da execução.
+            end_time (datetime, optional): Timestamp de finalização.
+        """
+        try:
+            log_ref = self.db.collection('system_logs').document(run_id)
+            
+            if status == 'started':
+                log_entry = {
+                    "run_id": run_id,
+                    "service": service,
+                    "job_type": job_type,
+                    "status": status,
+                    "message": message,
+                    "start_time": datetime.now(timezone.utc),
+                    "end_time": None,
+                    "error_message": None,
+                    "metrics": None
+                }
+                log_ref.set(log_entry)
+                logging.info(f"Log de início de job registrado com run_id: {run_id}")
+            else:
+                update_data = {
+                    "status": status,
+                    "message": message,
+                    "end_time": end_time or datetime.now(timezone.utc)
+                }
+                if error_message:
+                    update_data['error_message'] = error_message
+                if metrics:
+                    update_data['metrics'] = metrics
+                
+                log_ref.update(update_data)
+                logging.info(f"Log de finalização de job atualizado para run_id: {run_id}")
+
+        except Exception as e:
+            logging.error(f"Erro ao registrar evento de log no Firestore: {e}")

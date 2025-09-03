@@ -2,6 +2,7 @@
 import os
 from google.cloud import secretmanager
 from logging_config import logging
+from typing import Optional
 
 class SecretManagerService:
     """
@@ -21,23 +22,24 @@ class SecretManagerService:
             logging.error(f"Falha ao inicializar o cliente do Secret Manager: {e}")
             raise
 
-    def get_secret(self, secret_id: str, version_id: str = "latest"):
+    def get_secret_payload(self, secret_path: str) -> Optional[bytes]:
         """
-        Busca o valor de um segredo no Secret Manager.
+        Busca o payload binário de um segredo no Secret Manager.
+        Ideal para arquivos de sessão que não devem ser decodificados.
 
         Args:
-            secret_id (str): O ID do segredo.
-            version_id (str): A versão do segredo (padrão: "latest").
+            secret_path (str): O caminho completo do recurso do segredo
+                               (ex: projects/ID/secrets/NOME/versions/1).
 
         Returns:
-            str: O valor do segredo ou None em caso de erro.
+            bytes: O payload do segredo como bytes, ou None em caso de erro.
         """
         try:
-            name = f"projects/{self.project_id}/secrets/{secret_id}/versions/{version_id}"
-            response = self.client.access_secret_version(request={"name": name})
-            payload = response.payload.data.decode("UTF-8")
-            logging.info(f"Segredo '{secret_id}' acessado com sucesso.")
+            # O nome já é o caminho completo, não precisa montar.
+            response = self.client.access_secret_version(request={"name": secret_path})
+            payload = response.payload.data
+            logging.info(f"Payload do segredo '{secret_path}' acessado com sucesso.")
             return payload
         except Exception as e:
-            logging.error(f"Erro ao acessar o segredo '{secret_id}': {e}")
+            logging.error(f"Erro ao acessar o payload do segredo '{secret_path}': {e}")
             return None

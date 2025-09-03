@@ -2,6 +2,8 @@
 import os
 from google.cloud import storage
 from logging_config import logging
+from io import BytesIO
+from typing import Optional
 
 class GCSService:
     """
@@ -22,27 +24,29 @@ class GCSService:
             logging.error(f"Falha ao conectar com o GCS: {e}")
             raise
 
-    def upload_media(self, file_path: str, destination_blob_name: str):
+    def upload_media_from_buffer(self, buffer: BytesIO, destination_blob_name: str) -> Optional[str]:
         """
-        Faz o upload de um arquivo de mídia para o GCS.
+        Faz o upload de um buffer de mídia em memória para o GCS.
 
         Args:
-            file_path (str): O caminho local do arquivo a ser enviado.
+            buffer (BytesIO): O buffer em memória contendo os dados da mídia.
             destination_blob_name (str): O nome do blob de destino no GCS.
 
         Returns:
-            str: A URL pública do arquivo no GCS ou None em caso de erro.
+            str: O caminho GCS completo (gs://...) do arquivo ou None em caso de erro.
         """
         try:
             blob = self.bucket.blob(destination_blob_name)
-            blob.upload_from_filename(file_path)
-            logging.info(f"Arquivo {file_path} enviado para {destination_blob_name} no GCS.")
-            return blob.public_url
+            # O SDK infere o content_type a partir da extensão do nome do blob
+            blob.upload_from_file(buffer, rewind=True)
+            gcs_path = f"gs://{self.bucket_name}/{destination_blob_name}"
+            logging.info(f"Buffer enviado para {gcs_path} no GCS.")
+            return gcs_path
         except Exception as e:
-            logging.error(f"Erro ao fazer upload para o GCS: {e}")
+            logging.error(f"Erro ao fazer upload do buffer para o GCS: {e}")
             return None
 
-    def download_media(self, source_blob_name: str, destination_file_name: str):
+    def download_media(self, source_blob_name: str, destination_file_name: str) -> bool:
         """
         Faz o download de um arquivo de mídia do GCS.
 
