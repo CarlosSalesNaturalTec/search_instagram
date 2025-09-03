@@ -33,11 +33,10 @@ class FirestoreService:
             acc_ref = self.db.collection('service_accounts')
             query = acc_ref.where(filter=FieldFilter("status", "==", "active")).order_by("last_used_at", direction=firestore.Query.ASCENDING).limit(1)
             
-            # Precisamos pegar o ID do documento junto com os dados
             accounts = []
             for doc in query.stream():
                 account_data = doc.to_dict()
-                account_data['doc_id'] = doc.id # Adiciona o ID para referência futura
+                account_data['doc_id'] = doc.id
                 accounts.append(account_data)
 
             if not accounts:
@@ -54,14 +53,6 @@ class FirestoreService:
     def update_service_account_status(self, username: str, status: str, last_used_at: Optional[datetime] = None) -> bool:
         """
         Atualiza o status e a data de último uso de uma conta de serviço.
-
-        Args:
-            username (str): O nome de usuário da conta a ser atualizada.
-            status (str): O novo status ('active', 'session_expired', 'banned').
-            last_used_at (datetime, optional): Timestamp do último uso. Defaults to None.
-
-        Returns:
-            True se a atualização for bem-sucedida, False caso contrário.
         """
         try:
             acc_ref = self.db.collection('service_accounts')
@@ -87,26 +78,30 @@ class FirestoreService:
     def get_active_monitored_profiles(self) -> List[Dict[str, Any]]:
         """
         Busca todos os perfis monitorados que estão ativos.
-        O ID do documento é o próprio 'instagram_username'.
         """
-        return self._get_active_items('monitored_profiles')
+        return self._get_active_items('monitored_profiles', 'instagram_username')
 
     def get_active_monitored_hashtags(self) -> List[Dict[str, Any]]:
         """
         Busca todas as hashtags monitoradas que estão ativas.
-        O ID do documento é a hashtag sem o '#'.
         """
-        return self._get_active_items('monitored_hashtags')
+        return self._get_active_items('monitored_hashtags', 'hashtag_sem_cerquilha')
 
-    def _get_active_items(self, collection_name: str) -> List[Dict[str, Any]]:
+    def _get_active_items(self, collection_name: str, id_field: str) -> List[Dict[str, Any]]:
         """
-        Função auxiliar para buscar itens ativos de uma coleção.
+        Função auxiliar para buscar itens ativos de uma coleção, garantindo que o
+        campo usado como ID do documento esteja presente nos dados retornados.
         """
         try:
             coll_ref = self.db.collection(collection_name)
             query = coll_ref.where(filter=FieldFilter("is_active", "==", True))
-            # O ID do documento é a chave primária (username/hashtag)
-            items = [doc.to_dict() for doc in query.stream()]
+            items = []
+            for doc in query.stream():
+                item_data = doc.to_dict()
+                # Garante que o campo que usamos como ID esteja no dicionário
+                item_data[id_field] = doc.id
+                items.append(item_data)
+
             logging.info(f"{len(items)} itens ativos encontrados em '{collection_name}'.")
             return items
         except Exception as e:
@@ -128,15 +123,8 @@ class FirestoreService:
     def save_instagram_data(self, collection_path: str, data: Dict[str, Any], doc_id: str):
         """
         Salva (cria ou sobrescreve) um documento em uma coleção/sub-coleção.
-        Usa o ID fornecido como ID do documento para idempotência.
-
-        Args:
-            collection_path (str): Caminho da coleção (ex: 'instagram_posts' ou 'instagram_posts/shortcode/comments').
-            data (Dict[str, Any]): Os dados a serem salvos.
-            doc_id (str): O ID único do documento.
         """
         try:
-            # Adiciona um timestamp de coleta
             if 'collected_at' not in data:
                 data['collected_at'] = datetime.now(timezone.utc)
             
@@ -148,16 +136,6 @@ class FirestoreService:
     def log_system_event(self, run_id: str, service: str, job_type: str, status: str, message: str, error_message: Optional[str] = None, metrics: Optional[Dict[str, int]] = None, end_time: Optional[datetime] = None):
         """
         Registra um evento no log do sistema.
-
-        Args:
-            run_id (str): ID da execução do job.
-            service (str): Nome do serviço (ex: 'Search_Instagram').
-            job_type (str): Tipo de job (ex: 'daily_profile_scan').
-            status (str): 'started', 'completed', 'error', 'warning'.
-            message (str): Mensagem descritiva.
-            error_message (str, optional): Detalhes do erro.
-            metrics (Dict[str, int], optional): Métricas da execução.
-            end_time (datetime, optional): Timestamp de finalização.
         """
         try:
             log_ref = self.db.collection('system_logs').document(run_id)

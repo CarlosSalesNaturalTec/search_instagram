@@ -51,27 +51,25 @@ class InstagramService:
             if not session_content:
                 raise ValueError("Conteúdo da sessão do Secret Manager está vazio.")
 
-            # Usar um arquivo temporário para carregar a sessão
             with tempfile.NamedTemporaryFile(mode='wb', delete=False, prefix=f"{username}_") as tmp_file:
                 self.temp_session_file = tmp_file.name
                 tmp_file.write(session_content)
 
             self.instaloader_instance = instaloader.Instaloader()
             self.instaloader_instance.load_session_from_file(username, self.temp_session_file)
-            logging.info(f"Sessão do Instaloader para '{username}' carregada com sucesso a partir de arquivo temporário.")
+            logging.info(f"Sessão do Instaloader para '{username}' carregada com sucesso.")
             
-            # Testar o login para validar a sessão imediatamente
             self.instaloader_instance.test_login()
             logging.info(f"Login para '{username}' testado e validado com sucesso.")
             return True
 
         except LoginRequiredException as e:
-            logging.error(f"Sessão para a conta '{username}' é inválida ou expirou. Marcando para renovação. Erro: {e}")
+            logging.error(f"Sessão para a conta '{username}' é inválida. Marcando para renovação. Erro: {e}")
             self.firestore_service.update_service_account_status(username, 'session_expired')
             self.firestore_service.log_system_event(self.run_id, "Search_Instagram", "session_validation", "error", f"Sessão para {username} é inválida.", str(e))
             return False
         except Exception as e:
-            logging.error(f"Falha inesperada ao configurar a sessão do Instaloader para '{username}': {e}")
+            logging.error(f"Falha inesperada ao configurar a sessão para '{username}': {e}")
             self.firestore_service.log_system_event(self.run_id, "Search_Instagram", "session_setup", "error", f"Erro ao configurar sessão para {username}.", str(e))
             return False
 
@@ -100,9 +98,9 @@ class InstagramService:
             logging.error(f"Erro ao fazer upload da mídia para {gcs_path}: {e}")
         return None
 
-    def _process_post(self, post: instaloader.Post):
+    def _process_post(self, post: instaloader.Post, from_hashtag: Optional[str] = None):
         """
-        Processa um único post, salva seus metadados, mídia e comentários.
+        Processa um único post, salva seus metadados, mídia e comentários enriquecidos.
         """
         post_date_str = post.date_utc.strftime('%Y-%m')
         file_extension = '.mp4' if post.is_video else '.jpg'
@@ -119,22 +117,26 @@ class InstagramService:
             "comments_count": post.comments,
             "media_type": post.typename,
             "gcs_media_path": gcs_media_path,
-            "nlp_status": "pending" # Adiciona status para o job de NLP
+            "collected_from_hashtag": from_hashtag,
+            "nlp_status": "pending"
         }
         self.firestore_service.save_instagram_data('instagram_posts', post_data, post.shortcode)
         
-        # Processar comentários
+        # Processar comentários com dados enriquecidos
         comments_iterator = post.get_comments()
         for comment in itertools.islice(comments_iterator, 100):
             comment_data = {
                 "post_shortcode": post.shortcode,
                 "text": comment.text,
                 "username": comment.owner.username,
+                "user_followers": comment.owner.followers,
+                "user_followees": comment.owner.followees,
+                "user_biography": comment.owner.biography,
+                "user_is_private": comment.owner.is_private,
                 "likes_count": comment.likes_count,
                 "comment_date_utc": comment.created_at_utc,
-                "nlp_status": "pending" # Adiciona status para o job de NLP
+                "nlp_status": "pending"
             }
-            # Salva como sub-coleção do post
             self.firestore_service.save_instagram_data(f'instagram_posts/{post.shortcode}/instagram_comments', comment_data, str(comment.id))
         
         self._human_like_pause(8, 22)
@@ -158,7 +160,7 @@ class InstagramService:
             "gcs_media_path": gcs_media_path,
         }
         self.firestore_service.save_instagram_data('instagram_stories', story_data, str(story.mediaid))
-        self._human_like_pause(3, 8) # Pausa menor para stories
+        self._human_like_pause(3, 8)
 
     def run_scan(self):
         """
@@ -168,7 +170,7 @@ class InstagramService:
             return
 
         try:
-            # Lógica de varredura de perfis
+            # 1. Varredura de Perfis
             profiles_to_scan = self.firestore_service.get_active_monitored_profiles()
             for profile_info in profiles_to_scan:
                 username = profile_info.get('instagram_username')
@@ -178,39 +180,53 @@ class InstagramService:
                 try:
                     profile = instaloader.Profile.from_username(self.instaloader_instance.context, username)
                     
-                    # 1. Coletar Posts
                     logging.info(f"Coletando posts para o perfil: {username}")
                     for post in profile.get_posts():
                         self._process_post(post)
                     
-                    # 2. Coletar Stories
                     logging.info(f"Coletando stories para o perfil: {username}")
                     for story in self.instaloader_instance.get_stories(userids=[profile.userid]):
                         for item in story.get_items():
                             self._process_story(item, profile.username)
 
-                    # Atualizar last_scanned_at para o perfil
                     self.firestore_service.update_monitored_item_scan_time('monitored_profiles', username)
-                    self._human_like_pause(180, 300) # Pausa longa entre perfis
+                    self._human_like_pause(180, 300)
 
                 except ProfileNotExistsException:
                     logging.warning(f"Perfil '{username}' não encontrado. Considerar desativar.")
                 except PrivateProfileNotFollowedException:
-                    logging.warning(f"Perfil '{username}' é privado e não é seguido pela conta de serviço. Pulando.")
+                    logging.warning(f"Perfil '{username}' é privado e não é seguido. Pulando.")
                 except Exception as e:
                     logging.error(f"Erro ao processar o perfil '{username}': {e}", exc_info=True)
 
-            # TODO: Adicionar lógica de varredura de hashtags aqui
+            # 2. Varredura de Hashtags
+            hashtags_to_scan = self.firestore_service.get_active_monitored_hashtags()
+            for hashtag_info in hashtags_to_scan:
+                hashtag_name = hashtag_info.get('hashtag_sem_cerquilha')
+                if not hashtag_name: continue
+
+                logging.info(f"Iniciando varredura da hashtag: #{hashtag_name}")
+                try:
+                    hashtag = instaloader.Hashtag.from_name(self.instaloader_instance.context, hashtag_name)
+                    
+                    # Coleta os 50 posts mais recentes da hashtag
+                    for post in itertools.islice(hashtag.get_posts(), 50):
+                        self._process_post(post, from_hashtag=hashtag_name)
+                    
+                    self.firestore_service.update_monitored_item_scan_time('monitored_hashtags', hashtag_name)
+                    self._human_like_pause(180, 300)
+
+                except Exception as e:
+                    logging.error(f"Erro ao processar a hashtag '#{hashtag_name}': {e}", exc_info=True)
 
         except TooManyRequestsException as e:
-            logging.warning(f"Recebida exceção TooManyRequestsException. Encerrando o job e entrando em backoff. Erro: {e}")
+            logging.warning(f"Recebida exceção TooManyRequestsException. Encerrando job. Erro: {e}")
             self.firestore_service.log_system_event(self.run_id, "Search_Instagram", "data_collection", "warning", "TooManyRequestsException recebida.", str(e))
-            time.sleep(random.uniform(900, 1800)) # Backoff
+            time.sleep(random.uniform(900, 1800))
         except Exception as e:
-            logging.critical(f"Erro não tratado durante a execução da varredura: {e}", exc_info=True)
+            logging.critical(f"Erro não tratado durante a varredura: {e}", exc_info=True)
             self.firestore_service.log_system_event(self.run_id, "Search_Instagram", "data_collection", "error", "Erro crítico na varredura.", str(e))
         finally:
-            # Atualizar o last_used_at da conta de serviço
             if self.service_account:
                 self.firestore_service.update_service_account_status(
                     self.service_account['username'], 
